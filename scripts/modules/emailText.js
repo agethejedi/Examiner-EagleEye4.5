@@ -30,7 +30,7 @@ const homoglyphMap = {
   'z':['ᴢ','ž']
 };
 
-// --- NEW: ASCII confusables frequently used in domains (paypaI.com) ---
+// --- ASCII confusables frequently used in domains (paypaI.com) ---
 const asciiLookalikes = [
   ['l','I','1','|'],
   ['O','0'],
@@ -53,25 +53,19 @@ function hostHasIDN(host){
   return (host || '').split('.').some(p => p.startsWith('xn--'));
 }
 
-// NEW: flag if domain contains suspicious ASCII confusables in the middle of a label
+// flag if domain contains suspicious ASCII confusables in the middle of a label
 function hasAsciiConfusable(domain){
   const d = (domain || '').trim();
   if (!d) return false;
 
-  // If the domain has uppercase in the host portion, that's already suspicious for many user-entered domains.
-  // But we focus on classic look-alike patterns.
   for (const group of asciiLookalikes) {
     const charClass = group.map(c => c.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')).join('');
     const re = new RegExp('[' + charClass + ']');
 
     if (re.test(d)) {
-      // Stronger signal if it appears between alphanumerics in the host
-      // e.g., "paypaI.com" => I is between a and . (still part of label)
-      // We'll check each label
       const labels = d.split('.');
       for (const label of labels) {
         if (label.length < 3) continue;
-        // confusable somewhere not at the very ends
         const mid = label.slice(1, -1);
         if (re.test(mid)) return true;
       }
@@ -80,22 +74,36 @@ function hasAsciiConfusable(domain){
   return false;
 }
 
-// NEW: any non-ASCII chars in the domain (script-mix risk)
+// any non-ASCII chars in the domain (script-mix risk)
 function hasNonAscii(domain){
   return /[^\x00-\x7F]/.test(domain || '');
 }
 
-function isGovLike(url){
-  try{
-    const u = new URL(url);
-    const host = u.hostname.toLowerCase();
-    const isTrueGov = host.endsWith('.gov') || host.endsWith('.mil');
-    const looksLike = /(irs|ssa|uscis|fbi|cdc|treasury|usps|va|dot|ed|hhs|medicare|medicaid|state)\b/.test(host);
-    const fakeTld = /(\.com|\.net|\.org|\.co|\.info)$/i.test(host) && looksLike && !isTrueGov;
-    return { isTrueGov, fakeTld, host, idn: hostHasIDN(host) };
-  } catch(e) {
-    return { isTrueGov:false, fakeTld:false, host:null, idn:false };
-  }
+// ------------------------------
+// NEW: URL extraction + normalization
+// ------------------------------
+function extractUrls(text){
+  // Grab:
+  // - normal URLs (https://...)
+  // - hxxp:// obfuscation
+  // - domain[.]tld obfuscation
+  const t = text || '';
+  const hits = t.match(/(?:hxxps?:\/\/|https?:\/\/)[^\s)]+|[a-z0-9\-._]+\[\.\][a-z]{2,}/gi) || [];
+  return hits;
+}
+
+function normalizeLink(raw){
+  if(!raw) return '';
+  let s = raw.trim();
+  s = s.replace(/\[\.\]/g, '.');                 // fbi-security[.]com -> fbi-security.com
+  s = s.replace(/^hxxp(s?):\/\//i, 'http$1://'); // hxxp:// -> http://
+  if(!/^https?:\/\//i.test(s)) s = 'http://' + s; // allow bare domains
+  return s;
+}
+
+function safeURL(raw){
+  const s = normalizeLink(raw);
+  try { return new URL(s); } catch { return null; }
 }
 
 function analyzeSpellingGrammar(text){
@@ -121,6 +129,10 @@ export function analyzeEmailText({ sender, subject, body, links, weights }){
   const flags = [];
   const joined = (subject||'') + '\n' + (body||'');
 
+  // Merge links from Links box + URLs embedded in message/subject
+  const extracted = extractUrls(joined);
+  const allLinks = [...(links||[]), ...extracted].map(normalizeLink).filter(Boolean);
+
   const urgency = /(urgent|immediately|final notice|last attempt|act now|24 hours|suspended|locked|verify now)/i
     .test(joined) ? 85 : 0;
   if(urgency>0) flags.push({ sev: severityFromScore(urgency), msg:'Urgency detected in subject/body' });
@@ -129,7 +141,7 @@ export function analyzeEmailText({ sender, subject, body, links, weights }){
     .test(joined) ? 90 : 0;
   if(payment>0) flags.push({ sev: severityFromScore(payment), msg:'Demand-for-payment language detected' });
 
-  // ===== REPLACED SECTION: Sender domain homoglyph & IDN (stronger) =====
+  // ===== Sender domain homoglyph & IDN (stronger) =====
   const domain = (sender || '').split('@')[1] || '';
   let senderHomog = 0, senderIDN = 0;
 
@@ -164,24 +176,52 @@ export function analyzeEmailText({ sender, subject, body, links, weights }){
       });
     }
   }
-  // ===== END REPLACED SECTION =====
 
-  let fakeGov=0, trueGov=false, idnLink=false, shortener=0;
-  (links||[]).forEach(l=>{
-    const g = isGovLike(l);
-    if(g.isTrueGov) trueGov=true;
-    if(g.fakeTld) fakeGov=Math.max(fakeGov,95);
-    if(g.idn) idnLink=true;
-    try{
-      const h = new URL(l).hostname;
-      if(/(bit\.ly|tinyurl|t\.co|goo\.gl)$/i.test(h)) shortener=60;
-    } catch {}
+  // ===== Link analysis (explicit punycode + gov impersonation + obfuscation support) =====
+  let idnLink = false;
+  let fakeGov = 0;
+  let trueGov = false;
+  let shortener = 0;
+
+  allLinks.forEach(raw => {
+    const u = safeURL(raw);
+    if(!u) return;
+
+    const host = (u.hostname || '').toLowerCase();
+
+    // Punycode / IDN
+    if(hostHasIDN(host)) idnLink = true;
+
+    // Genuine .gov/.mil
+    if(host.endsWith('.gov') || host.endsWith('.mil')) trueGov = true;
+
+    // Gov impersonation pattern: gov words on non-gov TLD
+    const looksGov = /(irs|ssa|uscis|fbi|cdc|treasury|usps|va|dot|ed|hhs|medicare|medicaid|state)\b/.test(host);
+    const isNonGovTld = /\.(com|net|org|co|info)$/i.test(host);
+    const isActuallyGov = host.endsWith('.gov') || host.endsWith('.mil');
+
+    if(looksGov && isNonGovTld && !isActuallyGov){
+      fakeGov = Math.max(fakeGov, 95);
+    }
+
+    if (/(^|\.)((bit\.ly)|(tinyurl\.com)|(t\.co)|(goo\.gl))$/i.test(host)) {
+      shortener = Math.max(shortener, 60);
+    }
   });
 
-  if(fakeGov>0) flags.push({ sev:'danger', msg:'Link pretends to be government (.com/.net with gov terms)' });
-  if(trueGov)   flags.push({ sev:'ok',     msg:'Contains genuine .gov/.mil link' });
-  if(idnLink)   flags.push({ sev:'warn',   msg:'Link hostname uses IDN punycode (xn--)' });
-  if(shortener>0) flags.push({ sev:'warn', msg:'Shortened link present' });
+  // Clear, user-facing flags
+  if(idnLink) flags.push({
+    sev:'danger',
+    msg:'Punycode/IDN link detected (xn--) — attackers use this to hide look-alike domains.'
+  });
+
+  if(fakeGov>0) flags.push({
+    sev:'danger',
+    msg:'Government impersonation link — government terms used on a non-.gov domain.'
+  });
+
+  if(trueGov) flags.push({ sev:'ok', msg:'Contains genuine .gov/.mil link.' });
+  if(shortener>0) flags.push({ sev:'warn', msg:'Shortened link detected — destination is obscured.' });
 
   const sg = analyzeSpellingGrammar(joined);
   if(sg.score>35) flags.push({
@@ -189,14 +229,19 @@ export function analyzeEmailText({ sender, subject, body, links, weights }){
     msg: `High error rate in spelling/grammar (miss ~${Math.round(sg.detail.missRate*100)}%)`
   });
 
+  // Make link risks move the needle (scores remain 0-100; weights weight them)
+  const idnScore = idnLink ? 85 : 0;
+  const fakeGovScore = fakeGov > 0 ? 95 : 0;
+
   const combined = combineScores([
-    { score:(weights?.urgency ?? 60) * (urgency/100),     weight:1 },
-    { score:(weights?.demand  ?? 70) * (payment/100),     weight:1 },
-    { score:(weights?.homoglyph ?? 80) * (senderHomog/100), weight:1.1 },
-    { score:(weights?.gov     ?? 80) * (fakeGov/100),     weight:1 },
-    { score:(weights?.spell   ?? 55) * (sg.score/100),    weight:0.8 },
-    { score: shortener,                                   weight:0.3 },
-    { score: senderIDN,                                   weight:0.4 }
+    { score: urgency,      weight: (weights?.urgency ?? 60)/50 },      // ~1.2
+    { score: payment,      weight: (weights?.demand  ?? 70)/50 },      // ~1.4
+    { score: senderHomog,  weight: (weights?.homoglyph ?? 80)/50 },    // ~1.6
+    { score: fakeGovScore, weight: (weights?.gov ?? 80)/45 },          // ~1.8
+    { score: idnScore,     weight: 1.6 },
+    { score: shortener,    weight: 0.6 },
+    { score: senderIDN,    weight: 0.6 },
+    { score: sg.score,     weight: (weights?.spell ?? 55)/80 }         // lighter
   ]);
 
   return { score: combined, flags };
