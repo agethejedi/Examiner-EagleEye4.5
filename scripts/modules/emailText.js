@@ -2,17 +2,17 @@
 import { combineScores, severityFromScore } from './riskEngine.js';
 
 /**
- * Eagle Eye — Email/Text analysis
- * Drop-in build that:
- * - Detects sender-domain homoglyphs (Unicode + ASCII confusables) + non-ASCII/script-mix + punycode
- * - Extracts URLs from Subject/Message automatically (user doesn’t have to use the Links box)
- * - Normalizes common obfuscations: [.] and hxxp(s)://
- * - Flags: punycode/IDN, gov/civic impersonation, risky TLDs (e.g., .vip), payment lures, suspicious random subdomains, shorteners
- * - Scoring is “real” (0–100 signals weighted), so these indicators move the needle.
+ * Eagle Eye 4.5 — Email/Text analysis (FULL DROP-IN)
+ *
+ * Features:
+ * - Sender domain: Unicode homoglyphs + ASCII confusables + non-ASCII/script-mix + punycode
+ * - Links: extracted from Subject/Message automatically + Links box; supports [.] and hxxp(s):// obfuscation
+ * - Flags: punycode/IDN, gov/civic impersonation, risky TLD, payment lure paths, random/burner subdomains, shorteners
+ * - Scoring: 0–100 signals with weights + Option A "critical-stack floors" calibration
  */
 
 // ------------------------------
-// Unicode homoglyph map (existing)
+// Unicode homoglyph map
 // ------------------------------
 const homoglyphMap = {
   a: ['а', 'ᴀ', 'ɑ', 'α', 'ạ', 'ă', 'â'],
@@ -157,7 +157,10 @@ function analyzeSpellingGrammar(text) {
     'account','payment','verify','now','today','immediately','final','notice','due','past','overdue',
     'support','service','customer','dear','hello','hi','bank','invoice','statement','security','update',
     'confirm','link','click','contact','information','within','hours','business','days','warning',
-    'suspended','locked','urgent','request','action','required','thanks','regards'
+    'suspended','locked','urgent','request','action','required','thanks','regards',
+    // a few extras to reduce false "miss" on common legitimate terms
+    'texas','administrative','code','ticket','registration','license','enforcement','begins',
+    'september','prosecuted','credit','score','affected','reply','reopen','browser'
   ]);
 
   const words =
@@ -192,34 +195,36 @@ export function analyzeEmailText({ sender, subject, body, links, weights }) {
 
   // --- Urgency ---
   const urgency =
-    /(urgent|immediately|final notice|last attempt|act now|24 hours|suspended|locked|verify now)/i.test(
+    /(urgent|immediately|final notice|last attempt|act now|24 hours|suspended|locked|verify now|enforcement begins)/i.test(
       joined
     )
       ? 85
       : 0;
-  if (urgency > 0)
+  if (urgency > 0) {
     flags.push({
       sev: severityFromScore(urgency),
       msg: 'Urgency detected in subject/body',
     });
+  }
 
   // --- Payment demand ---
   const payment =
-    /(pay now|overdue|past due|wire|zelle|gift card|bitcoin|crypto|cash app|western union|money order|cashier's check)/i.test(
+    /(pay now|payment|overdue|past due|wire|zelle|gift card|bitcoin|crypto|cash app|western union|money order|cashier's check|service fee)/i.test(
       joined
     )
       ? 90
       : 0;
-  if (payment > 0)
+  if (payment > 0) {
     flags.push({
       sev: severityFromScore(payment),
       msg: 'Demand-for-payment language detected',
     });
+  }
 
   // --- Sender domain homoglyph + IDN ---
   const domain = (sender || '').split('@')[1] || '';
-  let senderHomog = 0,
-    senderIDN = 0;
+  let senderHomog = 0;
+  let senderIDN = 0;
 
   if (domain) {
     const hits = [];
@@ -283,12 +288,10 @@ export function analyzeEmailText({ sender, subject, body, links, weights }) {
       host
     );
 
-    const isNonGovTld = /\.(com|net|org|co|info|vip|top|xyz|icu|shop|click|live|buzz|work|loan)$/i.test(
-      host
-    );
     const isActuallyGov = host.endsWith('.gov') || host.endsWith('.mil');
 
-    if (looksGov && isNonGovTld && !isActuallyGov) {
+    // If it "looks gov" but is not actually .gov/.mil => impersonation
+    if (looksGov && !isActuallyGov) {
       fakeGov = Math.max(fakeGov, 95);
     }
 
@@ -316,62 +319,69 @@ export function analyzeEmailText({ sender, subject, body, links, weights }) {
   });
 
   // Clear user-facing flags ("badges")
-  if (idnLink)
+  if (idnLink) {
     flags.push({
       sev: 'danger',
       msg: 'Punycode/IDN link detected (xn--) — attackers use this to hide look-alike domains.',
     });
+  }
 
-  if (fakeGov > 0)
+  if (fakeGov > 0) {
     flags.push({
       sev: 'danger',
       msg: 'Government/civic impersonation link — government terms used on a non-.gov domain.',
     });
+  }
 
-  if (riskyTld > 0)
+  if (riskyTld > 0) {
     flags.push({
       sev: 'danger',
       msg: 'High-risk top-level domain often used in phishing (e.g., .vip, .top, .xyz).',
     });
+  }
 
-  if (payPath > 0)
+  if (payPath > 0) {
     flags.push({
       sev: 'danger',
       msg: 'Payment/checkout lure detected in the URL path/query.',
     });
+  }
 
-  if (randomSub > 0)
+  if (randomSub > 0) {
     flags.push({
       sev: 'warn',
       msg: 'Suspicious/random subdomain pattern often used for burner phishing hosts.',
     });
+  }
 
-  if (trueGov)
+  if (trueGov) {
     flags.push({ sev: 'ok', msg: 'Contains genuine .gov/.mil link.' });
+  }
 
-  if (shortener > 0)
+  if (shortener > 0) {
     flags.push({
       sev: 'warn',
       msg: 'Shortened link detected — destination is obscured.',
     });
+  }
 
   // Spelling/grammar heuristic
   const sg = analyzeSpellingGrammar(joined);
-  if (sg.score > 35)
+  if (sg.score > 35) {
     flags.push({
       sev: severityFromScore(sg.score),
       msg: `High error rate in spelling/grammar (miss ~${Math.round(
         sg.detail.missRate * 100
       )}%)`,
     });
+  }
 
-  // Scoring: use true 0–100 signals; weights truly weight signals
-  // NOTE: weights values are slider 0–100; we scale to reasonable weights.
-  const wUrg = (weights?.urgency ?? 60) / 50; // ~1.2
-  const wDem = (weights?.demand ?? 70) / 50; // ~1.4
-  const wHom = (weights?.homoglyph ?? 80) / 50; // ~1.6
-  const wGov = (weights?.gov ?? 80) / 45; // ~1.8
-  const wSpl = (weights?.spell ?? 55) / 80; // ~0.7
+  // Scoring: true 0–100 signals; weights truly weight signals
+  const wUrg = (weights?.urgency ?? 60) / 50;      // ~1.2
+  const wDem = (weights?.demand ?? 70) / 50;       // ~1.4
+  const wHom = (weights?.homoglyph ?? 80) / 50;    // ~1.6
+  const wGov = (weights?.gov ?? 80) / 45;          // ~1.8
+  const wSpl = (weights?.spell ?? 55) / 80;        // ~0.7
 
   const idnScore = idnLink ? 85 : 0;
   const fakeGovScore = fakeGov > 0 ? 95 : 0;
@@ -390,5 +400,26 @@ export function analyzeEmailText({ sender, subject, body, links, weights }) {
     { score: sg.score,      weight: wSpl },
   ]);
 
-  return { score: combined, flags };
+  // ---- Option A: critical-stack floors (calibration) ----
+  const criticalCount =
+    (urgency > 0 ? 1 : 0) +
+    (payment > 0 ? 1 : 0) +
+    (fakeGovScore > 0 ? 1 : 0) +
+    (riskyTld > 0 ? 1 : 0) +
+    (payPath > 0 ? 1 : 0) +
+    (idnScore > 0 ? 1 : 0) +
+    (senderHomog > 0 ? 1 : 0);
+
+  let finalScore = combined;
+
+  // impersonation + pay lure is almost always malicious
+  if (fakeGovScore > 0 && payPath > 0) finalScore = Math.max(finalScore, 85);
+
+  // 2+ critical indicators => high confidence scam/phish
+  if (criticalCount >= 2) finalScore = Math.max(finalScore, 75);
+
+  // 4+ critical indicators => extremely likely malicious
+  if (criticalCount >= 4) finalScore = Math.max(finalScore, 90);
+
+  return { score: finalScore, flags };
 }
