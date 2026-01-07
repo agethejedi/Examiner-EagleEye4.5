@@ -2,18 +2,13 @@
 import { combineScores, severityFromScore } from './riskEngine.js';
 
 /**
- * Eagle Eye 4.5 — Email/Text analysis (FULL DROP-IN)
+ * Eagle Eye 4.5 — Email/Text analysis (Truthful contributions)
  *
- * Features:
- * - Sender domain: Unicode homoglyphs + ASCII confusables + non-ASCII/script-mix + punycode
- * - Links: extracted from Subject/Message automatically + Links box; supports [.] and hxxp(s):// obfuscation
- * - Flags: punycode/IDN, gov/civic impersonation, risky TLD, payment lure paths, random/burner subdomains, shorteners
- * - Scoring: 0–100 signals with weights + Option A "critical-stack floors" calibration
+ * Adds:
+ * - flag.points (true contribution to score) for ring segmentation
+ * - calibration segment if critical floor boosts score
  */
 
-// ------------------------------
-// Unicode homoglyph map
-// ------------------------------
 const homoglyphMap = {
   a: ['а', 'ᴀ', 'ɑ', 'α', 'ạ', 'ă', 'â'],
   b: ['Ь', 'Ƅ', 'ƅ', 'ь'],
@@ -43,7 +38,6 @@ const homoglyphMap = {
   z: ['ᴢ', 'ž'],
 };
 
-// ASCII confusables used in domains (paypaI.com)
 const asciiLookalikes = [
   ['l', 'I', '1', '|'],
   ['O', '0'],
@@ -88,14 +82,7 @@ function hasNonAscii(domain) {
   return /[^\x00-\x7F]/.test(domain || '');
 }
 
-// ------------------------------
-// URL extraction + normalization
-// ------------------------------
 function extractUrls(text) {
-  // Captures:
-  // - https://... / http://...
-  // - hxxp:// / hxxps://
-  // - domains with [.] obfuscation
   const t = text || '';
   return (
     t.match(
@@ -107,17 +94,10 @@ function extractUrls(text) {
 function normalizeLink(raw) {
   if (!raw) return '';
   let s = raw.trim();
-
-  // common obfuscations
-  s = s.replace(/\[\.\]/g, '.'); // [.] -> .
-  s = s.replace(/^hxxp(s?):\/\//i, 'http$1://'); // hxxp -> http
-
-  // allow bare domains
+  s = s.replace(/\[\.\]/g, '.');
+  s = s.replace(/^hxxp(s?):\/\//i, 'http$1://');
   if (!/^https?:\/\//i.test(s)) s = 'http://' + s;
-
-  // strip trailing punctuation that often follows links in text
   s = s.replace(/[),.;]+$/g, '');
-
   return s;
 }
 
@@ -138,19 +118,12 @@ function getTld(host) {
 function looksRandomLabel(label) {
   const s = (label || '').toLowerCase();
   if (s.length < 6) return false;
-
-  // heuristics: low vowels, digits, or generally "burner-ish"
   const vowelCount = (s.match(/[aeiou]/g) || []).length;
   const digitCount = (s.match(/[0-9]/g) || []).length;
   const weird = /[^a-z0-9-]/.test(s);
-
-  // “random-ish”: very low vowels OR multiple digits, and not weird chars
   return !weird && (vowelCount <= 1 || digitCount >= 2);
 }
 
-// ------------------------------
-// Spelling/grammar heuristic
-// ------------------------------
 function analyzeSpellingGrammar(text) {
   const DICT = new Set([
     'the','and','to','of','in','for','you','your','is','are','this','that','we','our','please',
@@ -158,7 +131,6 @@ function analyzeSpellingGrammar(text) {
     'support','service','customer','dear','hello','hi','bank','invoice','statement','security','update',
     'confirm','link','click','contact','information','within','hours','business','days','warning',
     'suspended','locked','urgent','request','action','required','thanks','regards',
-    // a few extras to reduce false "miss" on common legitimate terms
     'texas','administrative','code','ticket','registration','license','enforcement','begins',
     'september','prosecuted','credit','score','affected','reply','reopen','browser'
   ]);
@@ -180,44 +152,53 @@ function analyzeSpellingGrammar(text) {
   return { score, detail: { missRate } };
 }
 
-// ------------------------------
-// Main analyzer
-// ------------------------------
 export function analyzeEmailText({ sender, subject, body, links, weights }) {
   const flags = [];
   const joined = (subject || '') + '\n' + (body || '');
 
-  // Merge: Links box + URLs embedded in subject/body (users paste anywhere)
+  // Build flags that also carry scoring fields (raw + weight)
+  function addScoredFlag({ sev, msg, raw, weight }) {
+    flags.push({ sev, msg, _raw: raw, _w: weight });
+  }
+  function addInfoFlag({ sev, msg }) {
+    flags.push({ sev, msg, points: 0 });
+  }
+
   const extracted = extractUrls(joined);
-  const allLinks = [...(links || []), ...extracted]
-    .map(normalizeLink)
-    .filter(Boolean);
+  const allLinks = [...(links || []), ...extracted].map(normalizeLink).filter(Boolean);
+
+  // Weights scaled for combineScores usage
+  const wUrg = (weights?.urgency ?? 60) / 50;      // ~1.2
+  const wDem = (weights?.demand ?? 70) / 50;       // ~1.4
+  const wHom = (weights?.homoglyph ?? 80) / 50;    // ~1.6
+  const wGov = (weights?.gov ?? 80) / 45;          // ~1.8
+  const wSpl = (weights?.spell ?? 55) / 80;        // ~0.7
 
   // --- Urgency ---
   const urgency =
-    /(urgent|immediately|final notice|last attempt|act now|24 hours|suspended|locked|verify now|enforcement begins)/i.test(
-      joined
-    )
+    /(urgent|immediately|final notice|last attempt|act now|24 hours|suspended|locked|verify now|enforcement begins)/i.test(joined)
       ? 85
       : 0;
   if (urgency > 0) {
-    flags.push({
+    addScoredFlag({
       sev: severityFromScore(urgency),
       msg: 'Urgency detected in subject/body',
+      raw: urgency,
+      weight: wUrg,
     });
   }
 
   // --- Payment demand ---
   const payment =
-    /(pay now|payment|overdue|past due|wire|zelle|gift card|bitcoin|crypto|cash app|western union|money order|cashier's check|service fee)/i.test(
-      joined
-    )
+    /(pay now|payment|overdue|past due|wire|zelle|gift card|bitcoin|crypto|cash app|western union|money order|cashier's check|service fee)/i.test(joined)
       ? 90
       : 0;
   if (payment > 0) {
-    flags.push({
+    addScoredFlag({
       sev: severityFromScore(payment),
       msg: 'Demand-for-payment language detected',
+      raw: payment,
+      weight: wDem,
     });
   }
 
@@ -248,15 +229,17 @@ export function analyzeEmailText({ sender, subject, body, links, weights }) {
       hits.push('IDN punycode (xn--)');
     }
 
-    if (hits.length) {
-      flags.push({
+    if (senderHomog > 0) {
+      addScoredFlag({
         sev: senderHomog >= 90 ? 'danger' : 'warn',
         msg: `Sender domain suspicious: ${hits.join(', ')} (${domain})`,
+        raw: senderHomog,
+        weight: wHom,
       });
     }
   }
 
-  // --- Link analysis (punycode, gov impersonation, risky TLD, payment lure, random subdomain, shorteners) ---
+  // --- Link analysis ---
   let idnLink = false;
   let fakeGov = 0;
   let trueGov = false;
@@ -277,130 +260,121 @@ export function analyzeEmailText({ sender, subject, body, links, weights }) {
     const host = (u.hostname || '').toLowerCase();
     const tld = getTld(host);
 
-    // Punycode / IDN
     if (hostHasIDN(host)) idnLink = true;
-
-    // Genuine gov/mil
     if (host.endsWith('.gov') || host.endsWith('.mil')) trueGov = true;
 
-    // Expanded gov/civic impersonation keywords
-    const looksGov = /(\b(us|usa|gov|state|county|city|municipal|district)\b|clerk|districtclerk|countyclerk|court|courts|judicial|tax|treasury|dmv|socialsecurity|medicare|medicaid|uscis|irs|fbi|police|sheriff|dps|attorneygeneral|publicrecords|voter)/i.test(
-      host
-    );
+    const looksGov =
+      /(\b(us|usa|gov|state|county|city|municipal|district)\b|clerk|districtclerk|countyclerk|court|courts|judicial|tax|treasury|dmv|socialsecurity|medicare|medicaid|uscis|irs|fbi|police|sheriff|dps|attorneygeneral|publicrecords|voter)/i.test(host);
 
     const isActuallyGov = host.endsWith('.gov') || host.endsWith('.mil');
+    if (looksGov && !isActuallyGov) fakeGov = Math.max(fakeGov, 95);
 
-    // If it "looks gov" but is not actually .gov/.mil => impersonation
-    if (looksGov && !isActuallyGov) {
-      fakeGov = Math.max(fakeGov, 95);
-    }
-
-    // Shorteners
     if (/(^|\.)((bit\.ly)|(tinyurl\.com)|(t\.co)|(goo\.gl))$/i.test(host)) {
       shortener = Math.max(shortener, 60);
     }
 
-    // Risky TLD
     if (riskyTlds.has(tld)) riskyTld = Math.max(riskyTld, 85);
 
-    // Payment lure
     const path = (u.pathname || '').toLowerCase();
     const query = (u.search || '').toLowerCase();
     const payLure =
-      /(\/pay\b|\/payment\b|\/invoice\b|\/billing\b|\/checkout\b|\/verify\b|\/confirm\b)/.test(
-        path
-      ) || /(pay=|payment=|invoice=|billing=)/.test(query);
+      /(\/pay\b|\/payment\b|\/invoice\b|\/billing\b|\/checkout\b|\/verify\b|\/confirm\b)/.test(path) ||
+      /(pay=|payment=|invoice=|billing=)/.test(query);
+
     if (payLure) payPath = Math.max(payPath, 90);
 
-    // Random/burner subdomain indicator
     const labels = host.split('.');
-    const hasRandom = labels.some((l) => looksRandomLabel(l));
-    if (hasRandom) randomSub = Math.max(randomSub, 70);
+    if (labels.some((l) => looksRandomLabel(l))) randomSub = Math.max(randomSub, 70);
   });
 
-  // Clear user-facing flags ("badges")
-  if (idnLink) {
-    flags.push({
+  const idnScore = idnLink ? 85 : 0;
+  const fakeGovScore = fakeGov > 0 ? 95 : 0;
+
+  if (idnScore > 0) {
+    addScoredFlag({
       sev: 'danger',
       msg: 'Punycode/IDN link detected (xn--) — attackers use this to hide look-alike domains.',
+      raw: idnScore,
+      weight: 1.6,
     });
   }
 
-  if (fakeGov > 0) {
-    flags.push({
+  if (fakeGovScore > 0) {
+    addScoredFlag({
       sev: 'danger',
       msg: 'Government/civic impersonation link — government terms used on a non-.gov domain.',
+      raw: fakeGovScore,
+      weight: wGov,
     });
   }
 
   if (riskyTld > 0) {
-    flags.push({
+    addScoredFlag({
       sev: 'danger',
       msg: 'High-risk top-level domain often used in phishing (e.g., .vip, .top, .xyz).',
+      raw: riskyTld,
+      weight: 1.2,
     });
   }
 
   if (payPath > 0) {
-    flags.push({
+    addScoredFlag({
       sev: 'danger',
       msg: 'Payment/checkout lure detected in the URL path/query.',
+      raw: payPath,
+      weight: 1.3,
     });
   }
 
   if (randomSub > 0) {
-    flags.push({
+    addScoredFlag({
       sev: 'warn',
       msg: 'Suspicious/random subdomain pattern often used for burner phishing hosts.',
+      raw: randomSub,
+      weight: 0.8,
     });
   }
 
   if (trueGov) {
-    flags.push({ sev: 'ok', msg: 'Contains genuine .gov/.mil link.' });
+    addInfoFlag({ sev: 'ok', msg: 'Contains genuine .gov/.mil link.' });
   }
 
   if (shortener > 0) {
-    flags.push({
+    addScoredFlag({
       sev: 'warn',
       msg: 'Shortened link detected — destination is obscured.',
+      raw: shortener,
+      weight: 0.6,
     });
   }
 
   // Spelling/grammar heuristic
   const sg = analyzeSpellingGrammar(joined);
   if (sg.score > 35) {
-    flags.push({
+    addScoredFlag({
       sev: severityFromScore(sg.score),
-      msg: `High error rate in spelling/grammar (miss ~${Math.round(
-        sg.detail.missRate * 100
-      )}%)`,
+      msg: `High error rate in spelling/grammar (miss ~${Math.round(sg.detail.missRate * 100)}%)`,
+      raw: sg.score,
+      weight: wSpl,
     });
   }
 
-  // Scoring: true 0–100 signals; weights truly weight signals
-  const wUrg = (weights?.urgency ?? 60) / 50;      // ~1.2
-  const wDem = (weights?.demand ?? 70) / 50;       // ~1.4
-  const wHom = (weights?.homoglyph ?? 80) / 50;    // ~1.6
-  const wGov = (weights?.gov ?? 80) / 45;          // ~1.8
-  const wSpl = (weights?.spell ?? 55) / 80;        // ~0.7
+  // Build combineScores inputs from scored flags
+  const scored = flags.filter(f => typeof f._raw === 'number' && typeof f._w === 'number');
+  const combineInputs = scored.map(f => ({ score: f._raw, weight: f._w }));
 
-  const idnScore = idnLink ? 85 : 0;
-  const fakeGovScore = fakeGov > 0 ? 95 : 0;
+  const combined = combineScores(combineInputs);
 
-  const combined = combineScores([
-    { score: urgency,       weight: wUrg },
-    { score: payment,       weight: wDem },
-    { score: senderHomog,   weight: wHom },
-    { score: fakeGovScore,  weight: wGov },
-    { score: idnScore,      weight: 1.6 },
-    { score: riskyTld,      weight: 1.2 },
-    { score: payPath,       weight: 1.3 },
-    { score: randomSub,     weight: 0.8 },
-    { score: shortener,     weight: 0.6 },
-    { score: senderIDN,     weight: 0.6 },
-    { score: sg.score,      weight: wSpl },
-  ]);
+  // Convert each scored flag into true contribution points:
+  // contribution = (raw * w) / sumWeights, which sums to "combined" (assuming weighted avg)
+  const sumW = scored.reduce((a, f) => a + (f._w || 0), 0) || 1;
+  scored.forEach(f => {
+    f.points = (f._raw * f._w) / sumW;
+    delete f._raw;
+    delete f._w;
+  });
 
-  // ---- Option A: critical-stack floors (calibration) ----
+  // ---- Option A: critical-stack floors ----
   const criticalCount =
     (urgency > 0 ? 1 : 0) +
     (payment > 0 ? 1 : 0) +
@@ -412,14 +386,21 @@ export function analyzeEmailText({ sender, subject, body, links, weights }) {
 
   let finalScore = combined;
 
-  // impersonation + pay lure is almost always malicious
   if (fakeGovScore > 0 && payPath > 0) finalScore = Math.max(finalScore, 85);
-
-  // 2+ critical indicators => high confidence scam/phish
   if (criticalCount >= 2) finalScore = Math.max(finalScore, 75);
-
-  // 4+ critical indicators => extremely likely malicious
   if (criticalCount >= 4) finalScore = Math.max(finalScore, 90);
+
+  // If calibration boosted score above combined, add a calibration segment so ring totals to finalScore.
+  if (finalScore > combined + 0.01) {
+    flags.push({
+      sev: 'danger',
+      msg: 'Calibration: critical-risk stack floor applied.',
+      points: finalScore - combined,
+    });
+  }
+
+  // Ensure every flag has points numeric (for UI safety)
+  flags.forEach(f => { if (typeof f.points !== 'number') f.points = 0; });
 
   return { score: finalScore, flags };
 }
