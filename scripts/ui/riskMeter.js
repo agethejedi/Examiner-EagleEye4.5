@@ -1,12 +1,12 @@
 // scripts/ui/riskMeter.js
 function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 
-function sevToColor(sev) {
+function sevToRGB(sev) {
   // RiskXLabs neon palette
-  if (sev === 'danger') return 'rgba(255, 132, 86, 1)'; // orange/red
-  if (sev === 'warn')   return 'rgba(255, 191, 76, 1)'; // amber
-  if (sev === 'ok')     return 'rgba(0, 229, 255, 1)';  // neon aqua
-  return 'rgba(120, 160, 190, 1)';                      // neutral
+  if (sev === 'danger') return [255, 132, 86]; // orange/red
+  if (sev === 'warn')   return [255, 191, 76]; // amber
+  if (sev === 'ok')     return [0, 229, 255];  // neon aqua
+  return [120, 160, 190];                      // neutral
 }
 
 function sevToAlpha(sev) {
@@ -16,22 +16,20 @@ function sevToAlpha(sev) {
   return 0.55;
 }
 
-// Turn flags into segments with weighted sizes.
-// (No analyzer changes required: this maps from existing flag.msg + flag.sev.)
 function inferSegmentsFromFlags(flags = [], score = 0) {
   const segments = [];
 
   const rules = [
-    { key: /urgency/i,                                  w: 12 },
-    { key: /(demand|payment|pay\b|service fee)/i,       w: 18 },
-    { key: /(government|civic|imperson)/i,              w: 22 },
-    { key: /(punycode|idn|xn--)/i,                      w: 14 },
-    { key: /(high-risk top-level|tld)/i,                w: 14 },
-    { key: /(checkout|invoice|billing|payment\/|\/pay)/i,w: 14 },
-    { key: /(shorten|shortened)/i,                      w: 8  },
-    { key: /(random subdomain|burner)/i,                w: 10 },
-    { key: /(spelling|grammar)/i,                       w: 7  },
-    { key: /(homoglyph|look-alike|non-ascii)/i,         w: 12 },
+    { key: /urgency/i,                                   w: 12 },
+    { key: /(demand|payment|pay\b|service fee)/i,        w: 18 },
+    { key: /(government|civic|imperson)/i,               w: 22 },
+    { key: /(punycode|idn|xn--)/i,                       w: 14 },
+    { key: /(high-risk top-level|tld)/i,                 w: 14 },
+    { key: /(checkout|invoice|billing|payment\/|\/pay)/i, w: 14 },
+    { key: /(shorten|shortened)/i,                       w: 8  },
+    { key: /(random subdomain|burner)/i,                 w: 10 },
+    { key: /(spelling|grammar)/i,                        w: 7  },
+    { key: /(homoglyph|look-alike|non-ascii)/i,          w: 12 },
   ];
 
   for (const f of flags) {
@@ -43,7 +41,7 @@ function inferSegmentsFromFlags(flags = [], score = 0) {
       if (r.key.test(msg)) { w = r.w; break; }
     }
 
-    // Slight bump based on severity
+    // Severity bump
     if (sev === 'danger') w *= 1.20;
     else if (sev === 'warn') w *= 1.05;
     else if (sev === 'ok') w *= 0.85;
@@ -51,11 +49,8 @@ function inferSegmentsFromFlags(flags = [], score = 0) {
     segments.push({ label: msg, sev, w });
   }
 
-  if (!segments.length) {
-    segments.push({ label: 'No notable signals', sev: 'neutral', w: 100 });
-  }
+  if (!segments.length) segments.push({ label: 'No notable signals', sev: 'neutral', w: 100 });
 
-  // Normalize to 100%
   const sum = segments.reduce((a, s) => a + s.w, 0) || 1;
   segments.forEach(s => { s.p = (s.w / sum) * 100; });
 
@@ -84,7 +79,7 @@ export function renderRiskMeter(el, { score = 0, flags = [], label = 'RISK SCORE
 
   const { segments, intensity } = inferSegmentsFromFlags(flags, score);
 
-  // Gap like your reference image
+  // Gap like the reference image
   const gapDeg = 18;
   const startDeg = -90 + gapDeg / 2;
   const usableDeg = 360 - gapDeg;
@@ -97,26 +92,37 @@ export function renderRiskMeter(el, { score = 0, flags = [], label = 'RISK SCORE
     const a1 = cursor + segDeg;
     cursor = a1;
 
-    const baseColor = sevToColor(s.sev);
-    const alpha = sevToAlpha(s.sev) * (0.60 + 0.40 * intensity); // brighter as score rises
-    const stroke = baseColor.replace(/rgba\(([^)]+)\)/, `rgba($1, ${alpha})`);
+    const [r, g, b] = sevToRGB(s.sev);
+    const alpha = sevToAlpha(s.sev) * (0.60 + 0.40 * intensity);
 
-    return `
+    // Segment stroke + subtle “sheen”
+    const seg = `
       <path d="${describeArc(cx, cy, ringR, a0, a1)}"
             fill="none"
-            stroke="${stroke}"
+            stroke="rgb(${r},${g},${b})"
             stroke-width="${ringW}"
-            stroke-linecap="butt" />
-      <!-- subtle sheen line -->
+            stroke-linecap="butt"
+            opacity="${alpha}" />
       <path d="${describeArc(cx, cy, ringR, a0, a1)}"
             fill="none"
             stroke="rgba(255,255,255,0.06)"
             stroke-width="${ringW}"
             stroke-linecap="butt" />
     `;
+
+    // Separator line (gives “segmented” look even if colors are similar)
+    const sep = `
+      <path d="${describeArc(cx, cy, ringR, a1 - 0.2, a1)}"
+            fill="none"
+            stroke="rgba(8,16,26,0.75)"
+            stroke-width="${ringW + 2}"
+            stroke-linecap="butt" />
+    `;
+
+    return seg + sep;
   }).join('\n');
 
-  // Thin progress highlight for “meter shading” feel
+  // Thin progress highlight for “meter shading”
   const progDeg = startDeg + usableDeg * clamp(score, 0, 100) / 100;
 
   el.innerHTML = `
@@ -125,13 +131,8 @@ export function renderRiskMeter(el, { score = 0, flags = [], label = 'RISK SCORE
         <defs>
           <filter id="rxGlow" x="-40%" y="-40%" width="180%" height="180%">
             <feGaussianBlur stdDeviation="3.8" result="blur"/>
-            <feColorMatrix in="blur" type="matrix"
-              values="1 0 0 0 0
-                      0 1 0 0 0
-                      0 0 1 0 0
-                      0 0 0 0.9 0"/>
             <feMerge>
-              <feMergeNode/>
+              <feMergeNode in="blur"/>
               <feMergeNode in="SourceGraphic"/>
             </feMerge>
           </filter>
@@ -157,12 +158,15 @@ export function renderRiskMeter(el, { score = 0, flags = [], label = 'RISK SCORE
 
         <!-- Track -->
         <circle cx="${cx}" cy="${cy}" r="${ringR}"
-                fill="none" stroke="rgba(40,70,95,0.9)" stroke-width="${ringW}" opacity="0.55"/>
+                fill="none"
+                stroke="rgba(40,70,95,0.9)"
+                stroke-width="${ringW}"
+                opacity="0.55"/>
 
         <!-- Segments -->
         ${segPaths}
 
-        <!-- Thin highlight for progress -->
+        <!-- Thin highlight -->
         <path d="${describeArc(cx, cy, ringR, startDeg, progDeg)}"
               fill="none"
               stroke="rgba(0,229,255,0.55)"
@@ -171,7 +175,9 @@ export function renderRiskMeter(el, { score = 0, flags = [], label = 'RISK SCORE
               filter="url(#rxGlow)" />
 
         <!-- Center disk -->
-        <circle cx="${cx}" cy="${cy}" r="64" fill="url(#rxCenterGlow)" filter="url(#rxInnerShadow)"/>
+        <circle cx="${cx}" cy="${cy}" r="64"
+                fill="url(#rxCenterGlow)"
+                filter="url(#rxInnerShadow)"/>
 
         <!-- Text -->
         <text x="${cx}" y="${cy-18}" text-anchor="middle" class="rxm-label">${label}</text>
