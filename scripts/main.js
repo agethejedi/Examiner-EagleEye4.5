@@ -3,29 +3,427 @@ import { analyzeCheck, setupCheckPaste } from './modules/checks.js';
 import { analyzeCrypto } from './modules/crypto.js';
 import { lookupSOS } from './modules/sos.js';
 import { scoreAddress } from './modules/address.js';
-const app=document.getElementById('app');
-app.innerHTML=`<header class="rx-header"><div class="rx-brand"><img src="assets/shield-flask.svg" class="rx-logo"/><h1><span class="white">Risk</span><span class="neon-x">X</span><span class="white">Labs</span></h1></div><nav class="rx-nav"><button data-tab="emailText" class="tab active">Email / Text</button><button data-tab="checks" class="tab">Checks</button><button data-tab="crypto" class="tab">Crypto Wallet</button><button data-tab="sos" class="tab">Secretary of State</button><button data-tab="address" class="tab">Address</button></nav><div class="rx-admin"><a href="#" id="admin-toggle">Admin ▸</a></div></header><main class="rx-main">`+
-`<section id="emailText" class="panel visible"><h2>Email / Text Analyzer</h2><div class="grid-2"><div><label class="field"><span>Sender</span><input id="et-sender"/></label><label class="field"><span>Subject</span><input id="et-subject"/></label><label class="field"><span>Message</span><textarea id="et-body" rows="10"></textarea></label><label class="field"><span>Links</span><textarea id="et-links" rows="4"></textarea></label><div class="actions"><button id="et-start" class="start">Start Analysis</button><button id="et-clear" class="clear">Clear</button></div></div><div><div class="card"><h3>Risk Score</h3><div class="donut" id="et-donut"><span id="et-score">0</span></div><div id="et-flags"></div></div><div class="card admin" id="et-admin" hidden><h3>Admin — Sensitivity</h3><label class="slider"><span>Urgency weight</span><input type="range" min="0" max="100" value="60" id="et-s-urgency"/></label><label class="slider"><span>Demand-for-payment weight</span><input type="range" min="0" max="100" value="70" id="et-s-demand"/></label><label class="slider"><span>Gov-link suspicion weight</span><input type="range" min="0" max="100" value="80" id="et-s-gov"/></label><label class="slider"><span>Homoglyph sensitivity</span><input type="range" min="0" max="100" value="80" id="et-s-homoglyph"/></label><label class="slider"><span>Spelling/grammar weight</span><input type="range" min="0" max="100" value="55" id="et-s-spell"/></label></div></div></div></section>`+
-`<section id="checks" class="panel"><h2>Checks Analyzer</h2><div class="grid-2"><div><div class="uploader"><input type="file" accept="image/*" id="check-file"/><div class="paste-hint">Tip: Paste an image with Cmd/Ctrl+V.</div></div><div class="actions"><button id="chk-start" class="start">Start Analysis</button><button id="chk-clear" class="clear">Clear</button></div><div class="card admin" id="chk-admin" hidden><h3>Admin — Sensitivity</h3><label class="slider"><span>Edge density threshold</span><input type="range" min="1" max="100" value="40" id="chk-edge-thr"/></label><label class="slider"><span>ABA strictness</span><input type="range" min="1" max="100" value="75" id="chk-aba-strict"/></label><label class="slider"><span>Alteration suspicion</span><input type="range" min="1" max="100" value="62" id="chk-alt-thr"/></label><label class="slider"><span>Washing sensitivity</span><input type="range" min="1" max="100" value="70" id="chk-wash-thr"/></label></div></div><div><div class="card"><h3>Risk Score</h3><div class="donut" id="chk-donut"><span id="chk-score">0</span></div><div id="chk-flags"></div></div><div class="card thumb-card"><h3>Highlighted Thumbnail</h3><canvas id="chk-thumb" width="360" height="220"></canvas><div class="thumb-legend"><span class="legend red"></span> Concerning areas</div></div></div></div></section>`+
-`<section id="crypto" class="panel"><h2>Crypto Wallet Analyzer</h2><div class="grid-2"><div><label class="field"><span>Networks to include</span><div class="grid-net"><label><input type="checkbox" class="net" value="Ethereum" checked> Ethereum</label><label><input type="checkbox" class="net" value="Solana" checked> Solana</label><label><input type="checkbox" class="net" value="Cardano"> Cardano</label><label><input type="checkbox" class="net" value="Tron"> Tron</label><label><input type="checkbox" class="net" value="Polygon" checked> Polygon</label><label><input type="checkbox" class="net" value="Hyperledger Fabric"> Hyperledger Fabric</label><label><input type="checkbox" class="net" value="Avalanche"> Avalanche</label><label><input type="checkbox" class="net" value="Stellar"> Stellar</label><label><input type="checkbox" class="net" value="Arbitrum"> Arbitrum</label><label><input type="checkbox" class="net" value="Binance"> Binance</label><label><input type="checkbox" class="net" value="Bitcoin" checked> Bitcoin</label><label><input type="checkbox" class="net" value="Ripple"> Ripple</label><label><input type="checkbox" class="net" value="Base"> Base</label></div></label><label class="field"><span>Wallet addresses (one per line)</span><textarea id="cw-addresses" rows="8" placeholder="0x...
+import { renderRiskMeter } from './ui/riskMeter.js';
+
+const app = document.getElementById('app');
+
+app.innerHTML =
+  `<header class="rx-header">
+    <div class="rx-brand">
+      <img src="assets/shield-flask.svg" class="rx-logo"/>
+      <h1><span class="white">Risk</span><span class="neon-x">X</span><span class="white">Labs</span></h1>
+    </div>
+    <nav class="rx-nav">
+      <button data-tab="emailText" class="tab active">Email / Text</button>
+      <button data-tab="checks" class="tab">Checks</button>
+      <button data-tab="crypto" class="tab">Crypto Wallet</button>
+      <button data-tab="sos" class="tab">Secretary of State</button>
+      <button data-tab="address" class="tab">Address</button>
+    </nav>
+    <div class="rx-admin"><a href="#" id="admin-toggle">Admin ▸</a></div>
+  </header>
+
+  <main class="rx-main">` +
+
+  // EMAIL/TEXT
+  `<section id="emailText" class="panel visible">
+    <h2>Email / Text Analyzer</h2>
+    <div class="grid-2">
+      <div>
+        <label class="field"><span>Sender</span><input id="et-sender"/></label>
+        <label class="field"><span>Subject</span><input id="et-subject"/></label>
+        <label class="field"><span>Message</span><textarea id="et-body" rows="10"></textarea></label>
+        <label class="field"><span>Links</span><textarea id="et-links" rows="4"></textarea></label>
+        <div class="actions">
+          <button id="et-start" class="start">Start Analysis</button>
+          <button id="et-clear" class="clear">Clear</button>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <h3>Risk Score</h3>
+
+          <!-- NEW segmented/shaded meter -->
+          <div class="rx-meter-wrap">
+            <div id="et-meter"></div>
+          </div>
+
+          <div id="et-flags"></div>
+        </div>
+
+        <div class="card admin" id="et-admin" hidden>
+          <h3>Admin — Sensitivity</h3>
+          <label class="slider"><span>Urgency weight</span><input type="range" min="0" max="100" value="60" id="et-s-urgency"/></label>
+          <label class="slider"><span>Demand-for-payment weight</span><input type="range" min="0" max="100" value="70" id="et-s-demand"/></label>
+          <label class="slider"><span>Gov-link suspicion weight</span><input type="range" min="0" max="100" value="80" id="et-s-gov"/></label>
+          <label class="slider"><span>Homoglyph sensitivity</span><input type="range" min="0" max="100" value="80" id="et-s-homoglyph"/></label>
+          <label class="slider"><span>Spelling/grammar weight</span><input type="range" min="0" max="100" value="55" id="et-s-spell"/></label>
+        </div>
+      </div>
+    </div>
+  </section>` +
+
+  // CHECKS
+  `<section id="checks" class="panel">
+    <h2>Checks Analyzer</h2>
+    <div class="grid-2">
+      <div>
+        <div class="uploader">
+          <input type="file" accept="image/*" id="check-file"/>
+          <div class="paste-hint">Tip: Paste an image with Cmd/Ctrl+V.</div>
+        </div>
+        <div class="actions">
+          <button id="chk-start" class="start">Start Analysis</button>
+          <button id="chk-clear" class="clear">Clear</button>
+        </div>
+        <div class="card admin" id="chk-admin" hidden>
+          <h3>Admin — Sensitivity</h3>
+          <label class="slider"><span>Edge density threshold</span><input type="range" min="1" max="100" value="40" id="chk-edge-thr"/></label>
+          <label class="slider"><span>ABA strictness</span><input type="range" min="1" max="100" value="75" id="chk-aba-strict"/></label>
+          <label class="slider"><span>Alteration suspicion</span><input type="range" min="1" max="100" value="62" id="chk-alt-thr"/></label>
+          <label class="slider"><span>Washing sensitivity</span><input type="range" min="1" max="100" value="70" id="chk-wash-thr"/></label>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <h3>Risk Score</h3>
+          <div class="donut" id="chk-donut"><span id="chk-score">0</span></div>
+          <div id="chk-flags"></div>
+        </div>
+
+        <div class="card thumb-card">
+          <h3>Highlighted Thumbnail</h3>
+          <canvas id="chk-thumb" width="360" height="220"></canvas>
+          <div class="thumb-legend"><span class="legend red"></span> Concerning areas</div>
+        </div>
+      </div>
+    </div>
+  </section>` +
+
+  // CRYPTO
+  `<section id="crypto" class="panel">
+    <h2>Crypto Wallet Analyzer</h2>
+    <div class="grid-2">
+      <div>
+        <label class="field">
+          <span>Networks to include</span>
+          <div class="grid-net">
+            <label><input type="checkbox" class="net" value="Ethereum" checked> Ethereum</label>
+            <label><input type="checkbox" class="net" value="Solana" checked> Solana</label>
+            <label><input type="checkbox" class="net" value="Cardano"> Cardano</label>
+            <label><input type="checkbox" class="net" value="Tron"> Tron</label>
+            <label><input type="checkbox" class="net" value="Polygon" checked> Polygon</label>
+            <label><input type="checkbox" class="net" value="Hyperledger Fabric"> Hyperledger Fabric</label>
+            <label><input type="checkbox" class="net" value="Avalanche"> Avalanche</label>
+            <label><input type="checkbox" class="net" value="Stellar"> Stellar</label>
+            <label><input type="checkbox" class="net" value="Arbitrum"> Arbitrum</label>
+            <label><input type="checkbox" class="net" value="Binance"> Binance</label>
+            <label><input type="checkbox" class="net" value="Bitcoin" checked> Bitcoin</label>
+            <label><input type="checkbox" class="net" value="Ripple"> Ripple</label>
+            <label><input type="checkbox" class="net" value="Base"> Base</label>
+          </div>
+        </label>
+
+        <label class="field">
+          <span>Wallet addresses (one per line)</span>
+          <textarea id="cw-addresses" rows="8" placeholder="0x...
 bc1q...
-So1..."></textarea></label><div class="actions"><button id="cw-start" class="start">Start Analysis</button><button id="cw-clear" class="clear">Clear</button></div></div><div><div class="card"><h3>Risk Score</h3><div class="donut" id="cw-donut"><span id="cw-score">0</span></div><div id="cw-flags"></div></div></div></div></section>`+
-`<section id="sos" class="panel"><h2>Secretary of State Lookup</h2><div class="grid-2"><div><label class="field"><span>Business Name</span><input id="sos-name"/></label><label class="field"><span>State</span><select id="sos-state"><option value="TX">TX</option><option value="CA">CA</option><option value="DE">DE</option><option value="FL">FL</option><option value="NY">NY</option><option value="WA">WA</option></select></label><div class="actions"><button id="sos-start" class="start">Start</button><button id="sos-clear" class="clear">Clear</button></div></div><div><div class="card"><h3>Results</h3><pre id="sos-results" class="pre"></pre></div></div></div></section>`+
-`<section id="address" class="panel"><h2>Address Risk</h2><div class="grid-2"><div><label class="field"><span>Address</span><input id="addr-line"/></label><div class="actions"><button id="addr-start" class="start">Start</button><button id="addr-clear" class="clear">Clear</button></div></div><div><div class="card"><h3>Risk Score</h3><div class="donut" id="addr-donut"><span id="addr-score">0</span></div><div id="addr-flags"></div></div></div></div></section></main><footer class="rx-footer"><span>We Fight Fraud.</span></footer>`;
-const tabs=document.querySelectorAll('.tab');const panels=document.querySelectorAll('.panel');tabs.forEach(btn=>{btn.addEventListener('click',()=>{tabs.forEach(b=>b.classList.remove('active'));panels.forEach(p=>p.classList.remove('visible'));btn.classList.add('active');document.getElementById(btn.dataset.tab).classList.add('visible');});});
-const adminToggle=document.getElementById('admin-toggle');const adminCards=document.querySelectorAll('.card.admin');let adminOpen=false;adminToggle.addEventListener('click',(e)=>{e.preventDefault();adminOpen=!adminOpen;adminToggle.textContent=adminOpen?'Admin ▾':'Admin ▸';adminCards.forEach(c=>c.hidden=!adminOpen);});
-function setDonut(el,score){const donut=el;const deg=Math.round((score/100)*360);donut.style.background=`conic-gradient(${score>=70?'var(--danger)':score>=40?'var(--warn)':'var(--ok)'} 0deg ${deg}deg, #1a2a3a ${deg}deg 360deg)`;}
-document.getElementById('et-start').addEventListener('click',()=>{const inp={sender:document.getElementById('et-sender').value,subject:document.getElementById('et-subject').value,body:document.getElementById('et-body').value,links:document.getElementById('et-links').value.split('\n').map(s=>s.trim()).filter(Boolean),weights:{urgency:+document.getElementById('et-s-urgency')?.value||60,demand:+document.getElementById('et-s-demand')?.value||70,gov:+document.getElementById('et-s-gov')?.value||80,homoglyph:+document.getElementById('et-s-homoglyph')?.value||80,spell:+document.getElementById('et-s-spell')?.value||55}};const res=analyzeEmailText(inp);setDonut(document.getElementById('et-donut'),res.score);document.getElementById('et-score').textContent=res.score;const flags=document.getElementById('et-flags');flags.innerHTML='';res.flags.forEach(f=>{const div=document.createElement('div');div.className=`flag ${f.sev}`;div.textContent=f.msg;flags.appendChild(div);});});
-document.getElementById('et-clear').addEventListener('click',()=>{['et-sender','et-subject','et-body','et-links'].forEach(id=>document.getElementById(id).value='');document.getElementById('et-flags').innerHTML='';document.getElementById('et-score').textContent='0';setDonut(document.getElementById('et-donut'),0);});
-let loadedImageBitmap=null;const thumbCanvas=document.getElementById('chk-thumb');const thumbCtx=thumbCanvas.getContext('2d');
-document.getElementById('check-file').addEventListener('change',async(e)=>{const file=e.target.files[0];if(!file)return;const bmp=await createImageBitmap(file);loadedImageBitmap=bmp;drawThumb(bmp);});
-setupCheckPaste(async(bmp)=>{loadedImageBitmap=bmp;drawThumb(bmp);});
-function drawThumb(bmp){const c=thumbCanvas,ctx=thumbCtx;ctx.clearRect(0,0,c.width,c.height);const scale=Math.min(c.width/bmp.width,c.height/bmp.height);const dw=bmp.width*scale,dh=bmp.height*scale;const dx=(c.width-dw)/2,dy=(c.height-dh)/2;ctx.drawImage(bmp,dx,dy,dw,dh);}
-document.getElementById('chk-start').addEventListener('click',async()=>{if(!loadedImageBitmap){alert('Please upload or paste a check image.');return;}const opts={edgeThr:+document.getElementById('chk-edge-thr')?.value||40,abaStrict:+document.getElementById('chk-aba-strict')?.value||75,altThr:+document.getElementById('chk-alt-thr')?.value||62,washThr:+document.getElementById('chk-wash-thr')?.value||70};const {score,flags,boxes}=await analyzeCheck(loadedImageBitmap,thumbCanvas,opts);thumbCtx.save();thumbCtx.lineWidth=2;thumbCtx.strokeStyle='#ef4444';thumbCtx.shadowColor='#ef4444';thumbCtx.shadowBlur=8;boxes.forEach(b=>thumbCtx.strokeRect(b.x,b.y,b.w,b.h));thumbCtx.restore();document.getElementById('chk-score').textContent=score;setDonut(document.getElementById('chk-donut'),score);const list=document.getElementById('chk-flags');list.innerHTML='';flags.forEach(f=>{const div=document.createElement('div');div.className=`flag ${f.sev}`;div.textContent=f.msg;list.appendChild(div);});});
-document.getElementById('chk-clear').addEventListener('click',()=>{thumbCtx.clearRect(0,0,thumbCanvas.width,thumbCanvas.height);document.getElementById('chk-score').textContent='0';setDonut(document.getElementById('chk-donut'),0);document.getElementById('chk-flags').innerHTML='';document.getElementById('check-file').value='';loadedImageBitmap=null;});
-document.getElementById('cw-start').addEventListener('click',async()=>{const nets=[...document.querySelectorAll('.net:checked')].map(cb=>cb.value);const addrs=document.getElementById('cw-addresses').value.split('\n').map(s=>s.trim()).filter(Boolean);const res=await analyzeCrypto({networks:nets,addresses:addrs});document.getElementById('cw-score').textContent=res.score;setDonut(document.getElementById('cw-donut'),res.score);const flags=document.getElementById('cw-flags');flags.innerHTML='';res.flags.forEach(f=>{const div=document.createElement('div');div.className=`flag ${f.sev}`;div.textContent=f.msg;flags.appendChild(div);});});
-document.getElementById('cw-clear').addEventListener('click',()=>{document.getElementById('cw-addresses').value='';document.getElementById('cw-flags').innerHTML='';document.getElementById('cw-score').textContent='0';setDonut(document.getElementById('cw-donut'),0);});
-document.getElementById('sos-start').addEventListener('click',async()=>{const res=await lookupSOS({name:document.getElementById('sos-name').value,state:document.getElementById('sos-state').value});document.getElementById('sos-results').textContent=JSON.stringify(res,null,2);});
-document.getElementById('sos-clear').addEventListener('click',()=>{document.getElementById('sos-name').value='';document.getElementById('sos-results').textContent='';});
-document.getElementById('addr-start').addEventListener('click',async()=>{const res=await scoreAddress(document.getElementById('addr-line').value);document.getElementById('addr-score').textContent=res.score;setDonut(document.getElementById('addr-donut'),res.score);const el=document.getElementById('addr-flags');el.innerHTML='';res.flags.forEach(f=>{const div=document.createElement('div');div.className=`flag ${f.sev}`;div.textContent=f.msg;el.appendChild(div);});});
-document.getElementById('addr-clear').addEventListener('click',()=>{document.getElementById('addr-line').value='';document.getElementById('addr-flags').innerHTML='';document.getElementById('addr-score').textContent='0';setDonut(document.getElementById('addr-donut'),0);});
+So1..."></textarea>
+        </label>
+
+        <div class="actions">
+          <button id="cw-start" class="start">Start Analysis</button>
+          <button id="cw-clear" class="clear">Clear</button>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <h3>Risk Score</h3>
+          <div class="donut" id="cw-donut"><span id="cw-score">0</span></div>
+          <div id="cw-flags"></div>
+        </div>
+      </div>
+    </div>
+  </section>` +
+
+  // SOS
+  `<section id="sos" class="panel">
+    <h2>Secretary of State Lookup</h2>
+    <div class="grid-2">
+      <div>
+        <label class="field"><span>Business Name</span><input id="sos-name"/></label>
+        <label class="field">
+          <span>State</span>
+          <select id="sos-state">
+            <option value="TX">TX</option><option value="CA">CA</option><option value="DE">DE</option>
+            <option value="FL">FL</option><option value="NY">NY</option><option value="WA">WA</option>
+          </select>
+        </label>
+        <div class="actions">
+          <button id="sos-start" class="start">Start</button>
+          <button id="sos-clear" class="clear">Clear</button>
+        </div>
+      </div>
+      <div>
+        <div class="card"><h3>Results</h3><pre id="sos-results" class="pre"></pre></div>
+      </div>
+    </div>
+  </section>` +
+
+  // ADDRESS
+  `<section id="address" class="panel">
+    <h2>Address Risk</h2>
+    <div class="grid-2">
+      <div>
+        <label class="field"><span>Address</span><input id="addr-line"/></label>
+        <div class="actions">
+          <button id="addr-start" class="start">Start</button>
+          <button id="addr-clear" class="clear">Clear</button>
+        </div>
+      </div>
+      <div>
+        <div class="card">
+          <h3>Risk Score</h3>
+          <div class="donut" id="addr-donut"><span id="addr-score">0</span></div>
+          <div id="addr-flags"></div>
+        </div>
+      </div>
+    </div>
+  </section>` +
+
+  `</main>
+   <footer class="rx-footer"><span>We Fight Fraud.</span></footer>`;
+
+// Tabs
+const tabs = document.querySelectorAll('.tab');
+const panels = document.querySelectorAll('.panel');
+tabs.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    tabs.forEach((b) => b.classList.remove('active'));
+    panels.forEach((p) => p.classList.remove('visible'));
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.tab).classList.add('visible');
+  });
+});
+
+// Admin toggle
+const adminToggle = document.getElementById('admin-toggle');
+const adminCards = document.querySelectorAll('.card.admin');
+let adminOpen = false;
+adminToggle.addEventListener('click', (e) => {
+  e.preventDefault();
+  adminOpen = !adminOpen;
+  adminToggle.textContent = adminOpen ? 'Admin ▾' : 'Admin ▸';
+  adminCards.forEach((c) => (c.hidden = !adminOpen));
+});
+
+// Donut helper (still used for checks/crypto/address)
+function setDonut(el, score) {
+  const donut = el;
+  const deg = Math.round((score / 100) * 360);
+  donut.style.background = `conic-gradient(${
+    score >= 70 ? 'var(--danger)' : score >= 40 ? 'var(--warn)' : 'var(--ok)'
+  } 0deg ${deg}deg, #1a2a3a ${deg}deg 360deg)`;
+}
+
+/* -----------------------------
+   EMAIL/TEXT — use segmented meter
+------------------------------ */
+const etMeterEl = document.getElementById('et-meter');
+
+// initialize meter at 0
+renderRiskMeter(etMeterEl, { score: 0, flags: [], label: 'RISK SCORE' });
+
+document.getElementById('et-start').addEventListener('click', () => {
+  const inp = {
+    sender: document.getElementById('et-sender').value,
+    subject: document.getElementById('et-subject').value,
+    body: document.getElementById('et-body').value,
+    links: document
+      .getElementById('et-links')
+      .value.split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    weights: {
+      urgency: +document.getElementById('et-s-urgency')?.value || 60,
+      demand: +document.getElementById('et-s-demand')?.value || 70,
+      gov: +document.getElementById('et-s-gov')?.value || 80,
+      homoglyph: +document.getElementById('et-s-homoglyph')?.value || 80,
+      spell: +document.getElementById('et-s-spell')?.value || 55,
+    },
+  };
+
+  const res = analyzeEmailText(inp);
+
+  // NEW: segmented/shaded meter driven by flags
+  renderRiskMeter(etMeterEl, { score: res.score, flags: res.flags, label: 'RISK SCORE' });
+
+  const flags = document.getElementById('et-flags');
+  flags.innerHTML = '';
+  res.flags.forEach((f) => {
+    const div = document.createElement('div');
+    div.className = `flag ${f.sev}`;
+    div.textContent = f.msg;
+    flags.appendChild(div);
+  });
+});
+
+document.getElementById('et-clear').addEventListener('click', () => {
+  ['et-sender', 'et-subject', 'et-body', 'et-links'].forEach(
+    (id) => (document.getElementById(id).value = '')
+  );
+  document.getElementById('et-flags').innerHTML = '';
+
+  // reset meter
+  renderRiskMeter(etMeterEl, { score: 0, flags: [], label: 'RISK SCORE' });
+});
+
+/* -----------------------------
+   CHECKS
+------------------------------ */
+let loadedImageBitmap = null;
+const thumbCanvas = document.getElementById('chk-thumb');
+const thumbCtx = thumbCanvas.getContext('2d');
+
+document.getElementById('check-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const bmp = await createImageBitmap(file);
+  loadedImageBitmap = bmp;
+  drawThumb(bmp);
+});
+
+setupCheckPaste(async (bmp) => {
+  loadedImageBitmap = bmp;
+  drawThumb(bmp);
+});
+
+function drawThumb(bmp) {
+  const c = thumbCanvas, ctx = thumbCtx;
+  ctx.clearRect(0, 0, c.width, c.height);
+  const scale = Math.min(c.width / bmp.width, c.height / bmp.height);
+  const dw = bmp.width * scale, dh = bmp.height * scale;
+  const dx = (c.width - dw) / 2, dy = (c.height - dh) / 2;
+  ctx.drawImage(bmp, dx, dy, dw, dh);
+}
+
+document.getElementById('chk-start').addEventListener('click', async () => {
+  if (!loadedImageBitmap) {
+    alert('Please upload or paste a check image.');
+    return;
+  }
+  const opts = {
+    edgeThr: +document.getElementById('chk-edge-thr')?.value || 40,
+    abaStrict: +document.getElementById('chk-aba-strict')?.value || 75,
+    altThr: +document.getElementById('chk-alt-thr')?.value || 62,
+    washThr: +document.getElementById('chk-wash-thr')?.value || 70,
+  };
+
+  const { score, flags, boxes } = await analyzeCheck(loadedImageBitmap, thumbCanvas, opts);
+
+  thumbCtx.save();
+  thumbCtx.lineWidth = 2;
+  thumbCtx.strokeStyle = '#ef4444';
+  thumbCtx.shadowColor = '#ef4444';
+  thumbCtx.shadowBlur = 8;
+  boxes.forEach((b) => thumbCtx.strokeRect(b.x, b.y, b.w, b.h));
+  thumbCtx.restore();
+
+  document.getElementById('chk-score').textContent = score;
+  setDonut(document.getElementById('chk-donut'), score);
+
+  const list = document.getElementById('chk-flags');
+  list.innerHTML = '';
+  flags.forEach((f) => {
+    const div = document.createElement('div');
+    div.className = `flag ${f.sev}`;
+    div.textContent = f.msg;
+    list.appendChild(div);
+  });
+});
+
+document.getElementById('chk-clear').addEventListener('click', () => {
+  thumbCtx.clearRect(0, 0, thumbCanvas.width, thumbCanvas.height);
+  document.getElementById('chk-score').textContent = '0';
+  setDonut(document.getElementById('chk-donut'), 0);
+  document.getElementById('chk-flags').innerHTML = '';
+  document.getElementById('check-file').value = '';
+  loadedImageBitmap = null;
+});
+
+/* -----------------------------
+   CRYPTO
+------------------------------ */
+document.getElementById('cw-start').addEventListener('click', async () => {
+  const nets = [...document.querySelectorAll('.net:checked')].map((cb) => cb.value);
+  const addrs = document
+    .getElementById('cw-addresses')
+    .value.split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const res = await analyzeCrypto({ networks: nets, addresses: addrs });
+
+  document.getElementById('cw-score').textContent = res.score;
+  setDonut(document.getElementById('cw-donut'), res.score);
+
+  const flags = document.getElementById('cw-flags');
+  flags.innerHTML = '';
+  res.flags.forEach((f) => {
+    const div = document.createElement('div');
+    div.className = `flag ${f.sev}`;
+    div.textContent = f.msg;
+    flags.appendChild(div);
+  });
+});
+
+document.getElementById('cw-clear').addEventListener('click', () => {
+  document.getElementById('cw-addresses').value = '';
+  document.getElementById('cw-flags').innerHTML = '';
+  document.getElementById('cw-score').textContent = '0';
+  setDonut(document.getElementById('cw-donut'), 0);
+});
+
+/* -----------------------------
+   SOS
+------------------------------ */
+document.getElementById('sos-start').addEventListener('click', async () => {
+  const res = await lookupSOS({
+    name: document.getElementById('sos-name').value,
+    state: document.getElementById('sos-state').value,
+  });
+  document.getElementById('sos-results').textContent = JSON.stringify(res, null, 2);
+});
+
+document.getElementById('sos-clear').addEventListener('click', () => {
+  document.getElementById('sos-name').value = '';
+  document.getElementById('sos-results').textContent = '';
+});
+
+/* -----------------------------
+   ADDRESS
+------------------------------ */
+document.getElementById('addr-start').addEventListener('click', async () => {
+  const res = await scoreAddress(document.getElementById('addr-line').value);
+  document.getElementById('addr-score').textContent = res.score;
+  setDonut(document.getElementById('addr-donut'), res.score);
+
+  const el = document.getElementById('addr-flags');
+  el.innerHTML = '';
+  res.flags.forEach((f) => {
+    const div = document.createElement('div');
+    div.className = `flag ${f.sev}`;
+    div.textContent = f.msg;
+    el.appendChild(div);
+  });
+});
+
+document.getElementById('addr-clear').addEventListener('click', () => {
+  document.getElementById('addr-line').value = '';
+  document.getElementById('addr-flags').innerHTML = '';
+  document.getElementById('addr-score').textContent = '0';
+  setDonut(document.getElementById('addr-donut'), 0);
+});
